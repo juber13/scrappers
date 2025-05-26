@@ -1,6 +1,6 @@
-/node_modules
-/dist
-/.juber.js
-/ttttttttttttt.js
-/quoa.js
-/.env
+node_modules/
+dist/
+.juber.js
+ttttttttttttt.js
+quoa.js
+.env
