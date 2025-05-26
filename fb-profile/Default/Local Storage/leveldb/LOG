@@ -1,0 +1,8 @@
+2025/05/22-10:38:49.293 76b0 Reusing MANIFEST C:\code\scrapper\fb-profile\Default\Local Storage\leveldb/MANIFEST-000001
+2025/05/22-10:38:49.308 76b0 Recovering log #3
+2025/05/22-10:38:49.312 76b0 Level-0 table #3: started
+2025/05/22-10:38:49.333 76b0 Level-0 table #3: 20049 bytes OK
+2025/05/22-10:38:49.340 76b0 Recovering log #4
+2025/05/22-10:38:49.353 76b0 Reusing old log C:\code\scrapper\fb-profile\Default\Local Storage\leveldb/000004.log 
+2025/05/22-10:38:49.359 76b0 Delete type=0 #3
+2025/05/22-10:38:49.360 76b0 Delete type=2 #5
