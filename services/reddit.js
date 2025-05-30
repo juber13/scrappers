@@ -7,7 +7,7 @@ const redditScrapper = async(req , res) => {
   try {
     console.log("Starting browser...");
     const browser = await chromium.launch({
-      headless: false,
+      headless: true,
       args: [
         "--disable-web-security",
         "--disable-features=IsolateOrigins,site-per-process",

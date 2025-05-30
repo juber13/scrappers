@@ -10,7 +10,7 @@ async function scrapePinterest(query) {
     // Launch browser with more explicit configuration
     console.log("Launching browser...");
     browser = await chromium.launch({
-      headless: false,
+      headless: true,
       executablePath:
         process.platform === "win32"
           ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"

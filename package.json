@@ -5,7 +5,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "build" : "npx playwright install",
+    "build" : "npx playwright install --with-deps",
     "start": "node index.js"
   },
   "author": "",

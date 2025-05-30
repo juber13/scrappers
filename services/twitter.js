@@ -140,7 +140,7 @@ async function performLogin(page) {
 async function scrapeTwitterSearch(query, maxPost) {
   await performLogin(page);
   const browser = await chromium.launch({
-    headless: false,
+    headless: true,
     args: [
       "--disable-web-security",
       "--disable-features=IsolateOrigins,site-per-process",

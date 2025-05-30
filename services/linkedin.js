@@ -23,7 +23,7 @@ async function loginLinkedIn(page) {
 
 const linkdinScaraper = async (req , res) => {
   const {query} = req.query;
-  const browser = await chromium.launch({ headless: false });
+  const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     userAgent:
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
