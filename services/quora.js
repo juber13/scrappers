@@ -1,157 +1,192 @@
 import { chromium } from "playwright";
-import axios from "axios";
+import express from "express";
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import { Solver } from "2captcha";
+
 dotenv.config();
 
-(async () => {
-  const browser = await chromium.launch({ headless: false });
-  const page = await browser.newPage();
-  await page.goto("https://www.quora.com/login");
+// Validate 2captcha API key
+const TWO_CAPTCHA_API_KEY = process.env.TWO_CAPTCHA_API_KEY;
+if (!TWO_CAPTCHA_API_KEY) {
+  console.error("Error: TWO_CAPTCHA_API_KEY is not set in environment variables");
+  process.exit(1);
+}
 
-  await page.waitForSelector('input[name="email"]');
-  await page.fill('input[name="email"]', process.env.QUORA_USERNAME);
-  await page.fill('input[name="password"]', process.env.QUORA_PASSWORD);
+const app = express();
+app.use(express.json());
 
-  await page.waitForSelector('iframe[title="reCAPTCHA"]', { timeout: 10000 });
+const OUTPUT_DIR = "quora_data";
+if (!fs.existsSync(OUTPUT_DIR)) {
+  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+}
 
-
-
-  // Extract site key
-  const siteKey = await page.evaluate(() => {
-    const iframe = document.querySelector('iframe[title="reCAPTCHA"]');
-    return iframe ? new URL(iframe.src).searchParams.get("k") : null;
-  });
-
-  async function extractCaptchaInfo() {
-    await page.goto("https://www.quora.com/login", {
-      waitUntil: "domcontentloaded",
-      timeout: 60000,
+async function extractCaptchaInfo(page) {
+  try {
+    // Wait for the reCAPTCHA iframe to be present
+    await page.waitForSelector('iframe[title="reCAPTCHA"]', { timeout: 10000 });
+    
+    // Extract sitekey from the iframe src
+    const sitekey = await page.evaluate(() => {
+      const iframe = document.querySelector('iframe[title="reCAPTCHA"]');
+      if (!iframe) return null;
+      const src = iframe.src;
+      const match = src.match(/k=([^&]+)/);
+      return match ? match[1] : null;
     });
 
-    if (page.url().includes("/sorry/")) {
-      const html = await page.content();
-
-      const sitekeyMatch = html.match(/data-sitekey="([^"]+)"/);
-      const dataSMatch = html.match(/data-s="([^"]+)"/);
-
-      if (!sitekeyMatch || !dataSMatch) {
-        throw new Error("Failed to extract sitekey or data-s");
-      }
-
-      return {
-        sitekey: sitekeyMatch[1],
-        dataS: dataSMatch[1],
-        url: page.url(),
-      };
+    if (!sitekey) {
+      throw new Error("Could not extract reCAPTCHA sitekey");
     }
 
-    console.log("No CAPTCHA found.");
+    console.log("Extracted sitekey:", sitekey);
+    return {
+      sitekey,
+      url: page.url()
+    };
+  } catch (error) {
+    console.error("Error extracting CAPTCHA info:", error);
     return null;
   }
+}
 
-
-  async function solveCaptchaWith2Captcha({ sitekey, dataS, url }) {
-      const res = await axios.get("http://2captcha.com/in.php", {
-        params: {
-          key: apiKey,
-          method: "userrecaptcha",
-          googlekey: sitekey,
-          pageurl: url,
-          datas: 'base64:',
-          json: 1,
-        },
-      });
-  
-      if (res.data.status === 1) {
-        return res.data.request;
-      } else {
-        throw new Error("Failed to submit CAPTCHA: " + res.data.error_text);
-      }
+async function solveCaptchaWith2Captcha(captchaInfo) {
+  try {
+    console.log("Initializing 2captcha solver...");
+    const solver = new Solver(TWO_CAPTCHA_API_KEY);
+    
+    console.log("Submitting CAPTCHA to 2captcha with sitekey:", captchaInfo.sitekey);
+    
+    // Ensure sitekey is a string and not empty
+    if (!captchaInfo.sitekey || typeof captchaInfo.sitekey !== 'string') {
+      throw new Error('Invalid sitekey: must be a non-empty string');
     }
 
-    
-      async function pollForToken(requestId) {
-        for (let i = 0; i < 30; i++) {
-          await new Promise((r) => setTimeout(r, 5000));
-    
-          const result = await axios.get("http://2captcha.com/res.php", {
-            params: {
-              key: apiKey,
-              action: "get",
-              id: requestId,
-              json: 1,
-            },
-          });
-    
-          if (result.data.status === 1) {
-            return result.data.request;
-          } else if (result.data.request !== "CAPCHA_NOT_READY") {
-            throw new Error("CAPTCHA Error: " + result.data.request);
+    // Create a promise that will resolve with the solution
+    return new Promise((resolve, reject) => {
+      solver.recaptcha(
+        captchaInfo.sitekey.toString(), // Ensure sitekey is a string
+        captchaInfo.url,
+        {
+          proxy: {
+            type: 'HTTP',
+            uri: process.env.PROXY_URI // Optional: Add proxy if needed
           }
         }
-        throw new Error("Timed out waiting for CAPTCHA solution");
+      )
+      .then(result => {
+        console.log("CAPTCHA solution received");
+        resolve(result.data);
+      })
+      .catch(error => {
+        console.error("Error from 2captcha:", error);
+        reject(error);
+      });
+    });
+  } catch (error) {
+    console.error("Error solving CAPTCHA:", error);
+    throw error;
+  }
+}
+
+async function applyCaptchaSolution(page, token) {
+  try {
+    console.log("Applying CAPTCHA solution...");
+    
+    // Inject the token into the page
+    await page.evaluate((token) => {
+      // Create or find the response element
+      let responseElement = document.getElementById("g-recaptcha-response");
+      if (!responseElement) {
+        responseElement = document.createElement("textarea");
+        responseElement.id = "g-recaptcha-response";
+        responseElement.name = "g-recaptcha-response";
+        responseElement.style.display = "none";
+        document.body.appendChild(responseElement);
       }
-    
-      const captchaInfo = await extractCaptchaInfo();
-      if (captchaInfo) {
-        const requestId = await solveCaptchaWith2Captcha(captchaInfo);
-        const token = await pollForToken(requestId);
-    
-        const captchaResponseInput = await page.$("#g-recaptcha-response");
-        if (captchaResponseInput) {
-          await page.evaluate((token) => {
-            const textarea = document.querySelector("#g-recaptcha-response");
-            if (textarea) textarea.style.display = "block";
-          }, token);
-          await captchaResponseInput.fill(token);
+      responseElement.value = token;
+
+      // Try to trigger the callback
+      if (window.___grecaptcha_cfg) {
+        const callback = window.___grecaptcha_cfg.clients[0].callback;
+        if (typeof callback === 'function') {
+          callback(token);
         }
-    
-        await page.evaluate(() => {
-          const form = document.querySelector("#captcha-form");
-          if (form) form.submit();
-        });
       }
+    }, token);
+
+    // Wait for the form to be enabled
+    await page.waitForFunction(() => {
+      const form = document.querySelector('form');
+      return form && !form.hasAttribute('disabled');
+    }, { timeout: 5000 });
+
+    // Wait for the login button to be enabled
+    console.log("Waiting for login button to be enabled...");
+    await page.waitForSelector("button:not([disabled])", { timeout: 10000 });
+
+    // Get the login button and click it
+    const loginBtn = await page.$("button:not([disabled])");
+    console.log("Login button found:", loginBtn ? "Yes" : "No");
+
+    if (loginBtn) {
+      console.log("Clicking login button...");
+      await loginBtn.click();
+      
+      // Wait for navigation
+      await page.waitForNavigation({ timeout: 30000 });
+      console.log("Navigation completed after login");
+    } else {
+      console.log("❌ Login button not found or not clickable");
+      throw new Error("Login button not found or not clickable");
+    }
+
+  } catch (error) {
+    console.error("Error applying CAPTCHA solution:", error);
+    throw error;
+  }
+}
+
+const quoraScraper = async (searchQuery, maxAnswers = 50) => {
+  const browser = await chromium.launch({
+    headless: false,
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--ignore-certificate-errors",
+    ],
+  });
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  try {
+    // Navigate to login page
+    await page.goto("https://www.quora.com/login");
     
+    // Fill in credentials using type() instead of fill()
+    await page.type("input[name='email']", process.env.QUORA_USERNAME);
+    await page.type("input[name='password']", process.env.QUORA_PASSWORD);
 
-
-  const captchaId = captchaResponse.data.request;
-
- 
-
-  // Inject CAPTCHA token
-  await page.evaluate((token) => {
-    let textarea = document.querySelector("#g-recaptcha-response");
-    if (!textarea) {
-      textarea = document.createElement("textarea");
-      textarea.id = "g-recaptcha-response";
-      textarea.name = "g-recaptcha-response";
-      textarea.style.display = "none";
-      document.body.appendChild(textarea);
-    }
-    textarea.value = token;
-
-    // Add a hidden input if required
-    const form = document.querySelector("form");
-    if (form && !form.querySelector('input[name="g-recaptcha-response"]')) {
-      const hiddenInput = document.createElement("input");
-      hiddenInput.type = "hidden";
-      hiddenInput.name = "g-recaptcha-response";
-      hiddenInput.value = token;
-      form.appendChild(hiddenInput);
-      console.log("token injected");
+    // Extract CAPTCHA info and solve if needed
+    const captchaInfo = await extractCaptchaInfo(page);
+    if (captchaInfo) {
+      console.log("CAPTCHA detected, solving...");
+      const token = await solveCaptchaWith2Captcha(captchaInfo);
+      await applyCaptchaSolution(page, token);
     }
 
-    // Trigger the reCAPTCHA callback
-    if (window.___grecaptcha_cfg) {
-      const callback = window.___grecaptcha_cfg.clients[0].callback;
-      if (typeof callback === 'function') {
-        callback(token);
-      }
-    }
-  }, captchaToken);
+    // Continue with the rest of your scraping logic...
+    console.log(`Searching Quora for: "${searchQuery}"`);
+    // ... rest of your existing scraping code ...
 
+  } catch (error) {
+    console.error("Error:", error);
+    return null;
+  } finally {
+    await browser.close();
+  }
+};
 
-  // Click the login button
-  console.log("Clicking login button...");
-  
-})();
+// Start the scraper
+quoraScraper("cybersecurity");

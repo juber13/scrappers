@@ -1,96 +1,183 @@
-import { chromium } from "playwright";
-import dotenv from "dotenv";
 import { Solver } from "2captcha";
+import { chromium } from "playwright";
+
+import dotenv from "dotenv";
+import { setTimeout } from "timers/promises";
+// Load environment variables
 
 dotenv.config();
 
-const API_KEY = process.env.TWO_CAPTCHA_API_KEY;
-const solver = new Solver(API_KEY);
+const solver = new Solver(process.env.TWO_CAPTCHA_API_KEY);
+const pageUrl = "https://quora.com";
 
-const url = "https://www.quora.com";
-const sitekey = "6Lcbz34UAAAAAL8AdJSo8BkXQ-pUMfr7OfbTZCY8";
-
-// async function solveCaptcha() {
-//   console.log("🔍 Solving reCAPTCHA...");
-//   const result = await solver.recaptcha({ sitekey, url });
-//   console.log("✅ Captcha Solved");
-//   return result.code;
-// }
-
-async function solveCaptcha(page, url) {
-  console.log("🔍 Extracting sitekey...");
-  const sitekey = await page.$eval("iframe[title=reCAPTCHA]", (el) =>
-    el.getAttribute("data-sitekey")
-  );
-
-  if (!sitekey || sitekey.length < 30) {
-    throw new Error("Sitekey not found or invalid on the page.");
+async function waitForRecaptchaLoad(page) {
+  try {
+    await page.waitForFunction(
+      () => {
+        return (
+          typeof window.___grecaptcha_cfg !== "undefined" &&
+          Object.keys(window.___grecaptcha_cfg.clients).length > 0
+        );
+      },
+      { timeout: 60000 }
+    );
+    return true;
+  } catch (error) {
+    console.error("Timeout waiting for reCAPTCHA to initialize");
+    return false;
   }
-
-  console.log("🔑 Sitekey:", sitekey);
-  console.log("🔍 Solving reCAPTCHA via 2Captcha...");
-  const result = await solver.recaptcha({ sitekey, url });
-  console.log("✅ Captcha Solved");
-  return result.code;
 }
 
+async function findRecaptchaClients(page) {
+  return page.evaluate(`function findRecaptchaClients() {
+		if (typeof (___grecaptcha_cfg) !== 'undefined') {
+			return Object.entries(___grecaptcha_cfg.clients).map(([cid, client]) => {
+				const data = { id: cid, version: cid >= 10000 ? 'V3' : 'V2' };
+				const objects = Object.entries(client).filter(([_, value]) => value && typeof value === 'object');
 
-async function run() {
-  const browser = await chromium.launch({ headless: false });
-  const context = await browser.newContext();
-  const page = await context.newPage();
+				objects.forEach(([toplevelKey, toplevel]) => {
+					const found = Object.entries(toplevel).find(([_, value]) => (
+						value && typeof value === 'object' && 'sitekey' in value && 'size' in value
+					));
+
+					if (typeof toplevel === 'object' && toplevel instanceof HTMLElement && toplevel['tagName'] === 'DIV') {
+						data.pageurl = toplevel.baseURI;
+					}
+
+					if (found) {
+						const [sublevelKey, sublevel] = found;
+
+						data.sitekey = sublevel.sitekey;
+						const callbackKey = data.version === 'V2' ? 'callback' : 'promise-callback';
+						const callback = sublevel[callbackKey];
+						if (!callback) {
+							data.callback = null;
+							data.function = null;
+						} else {
+							data.function = callback;
+							const keys = [cid, toplevelKey, sublevelKey, callbackKey].map((key) => \`['\${key}']\`).join('');
+							data.callback = \`___grecaptcha_cfg.clients\${keys}\`;
+						}
+					}
+				});
+				return data;
+			});
+		}
+		return [];
+	}
+	
+	findRecaptchaClients()`);
+}
+
+async function solveCaptcha(page) {
+  // Get all reCAPTCHA clients from the page
+  const clients = await findRecaptchaClients(page);
+
+  if (clients.length === 0) {
+    console.error("No reCAPTCHA clients found on the page");
+    return false;
+  }
+
+  // Use the first V2 captcha found
+  const captcha = clients.find((client) => client.version === "V2");
+
+  if (!captcha) {
+    console.error("No V2 reCAPTCHA found on the page");
+    return false;
+  }
+
+  console.log("Found reCAPTCHA:", {
+    version: captcha.version,
+    sitekey: captcha.sitekey,
+    hasCallback: !!captcha.callback,
+  });
 
   try {
-    console.log(`🔗 Navigating to ${url}...`);
-    await page.goto(url, { waitUntil: "load", timeout: 60000 });
+    const result = await solver.recaptcha(captcha.sitekey, pageUrl);
 
-    // Solve the reCAPTCHA with 2Captcha
-    const token = await solveCaptcha(page , url);
+    console.log("Captcha solved:", result.id);
+    // Insert the solution and execute callback if available
+    await page.evaluate(
+      ({ token, callback }) => {
+        // Set the response in textarea
+        document.querySelector('textarea[name="g-recaptcha-response"]').value =
+          token;
 
-    // Inject the CAPTCHA token into the page
-    await page.evaluate((captchaToken) => {
-      let textarea = document.querySelector("#g-recaptcha-response");
-      if (!textarea) {
-        textarea = document.createElement("textarea");
-        textarea.id = "g-recaptcha-response";
-        textarea.name = "g-recaptcha-response";
-        textarea.style.display = "none";
-        document.body.appendChild(textarea);
-      }
-      textarea.value = captchaToken;
-
-      const form = document.querySelector("form");
-      if (form) {
-        let hiddenInput = form.querySelector(
-          'input[name="g-recaptcha-response"]'
-        );
-        if (!hiddenInput) {
-          hiddenInput = document.createElement("input");
-          hiddenInput.type = "hidden";
-          hiddenInput.name = "g-recaptcha-response";
-          hiddenInput.value = captchaToken;
-          form.appendChild(hiddenInput);
-        } else {
-          hiddenInput.value = captchaToken;
+        // Execute callback if available
+        if (callback) {
+          const callbackFn = new Function(`return ${callback}`)();
+          if (typeof callbackFn === "function") {
+            console.log("Executing reCAPTCHA callback");
+            callbackFn(token);
+          }
         }
+      },
+      {
+        token: result.data,
+        callback: captcha.callback,
       }
-    }, token);
+    );
 
-    // Submit the form
-    console.log("🚀 Submitting the form...");
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "load", timeout: 60000 }),
-      page.click('button[type="submit"], input[type="submit"]'),
-    ]);
-
-    // Extract final result
-    const result = await page.textContent("td:last-child");
-    console.log("📦 Extracted Data:", result.trim());
-  } catch (err) {
-    console.error("❌ Error:", err.message);
-  } finally {
-    await browser.close();
+    return true;
+  } catch (error) {
+    console.error("Failed to solve captcha:", error);
+    return false;
   }
 }
 
-run();
+
+
+async function main() {
+  try {
+    // Launch browser
+    const browser = await chromium.launch({
+      headless: false,
+    });
+    const page = await browser.newPage();
+    console.log("Navigating to 2Captcha demo page...");
+
+    await page.goto(pageUrl, { waitUntil: "networkidle" });
+    await page.waitForSelector('input[name="email"]');
+    await page.fill('input[name="email"]', process.env.QUORA_USERNAME);
+    await page.fill('input[name="password"]', process.env.QUORA_PASSWORD);
+    await page.waitForTimeout(3000);
+
+
+    // Wait for reCAPTCHA to load
+    // const recaptchaFrame = await page.waitForSelector('iframe[src*="recaptcha"]');
+    const captchaCheckbox = await page.$('iframe[title="reCAPTCHA"]');
+
+    if (!captchaCheckbox) {
+      throw new Error("reCAPTCHA failed to initialize");
+    }
+    
+    console.log("reCAPTCHA initialized");
+
+    // Solve reCAPTCHA
+    const captchaSolution = await solver.recaptcha({
+      pageurl: page.url(),
+      googlekey: process.env.GOOGLE_API_KEY,
+    });
+
+    // Insert solution into the captcha response field
+    await page.fill("#g-recaptcha-response", captchaSolution);
+    console.log("Captcha solved successfully!");
+
+    await page.waitForTimeout(1000);
+
+    // Submit the form
+    await page.click('text="Check"');
+    console.log("Form submitted");
+
+    await page.waitForTimeout(15000);
+
+    // Close browser
+    // await browser.close();
+  } catch (error) {
+    console.error("An error occurred:", error);
+    process.exit(1);
+  }
+}
+
+main();
+
